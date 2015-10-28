@@ -8,15 +8,15 @@ import java.lang.reflect.InvocationTargetException;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.TimeZone;
-import java.util.UUID;
+import java.util.logging.Level;
 
+import lombok.Getter;
 import net.cubespace.Yamler.Config.InvalidConfigurationException;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.CommandSender;
@@ -26,7 +26,6 @@ import net.md_5.bungee.api.chat.TextComponent;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
-import com.imaginarycode.minecraft.redisbungee.RedisBungee;
 
 import fr.Alphart.BAT.BAT;
 import fr.Alphart.BAT.I18n.I18n;
@@ -36,12 +35,15 @@ import fr.Alphart.BAT.Modules.InvalidModuleException;
 import fr.Alphart.BAT.Modules.ModulesManager;
 import fr.Alphart.BAT.Modules.Ban.BanEntry;
 import fr.Alphart.BAT.Modules.Comment.CommentEntry;
-import fr.Alphart.BAT.Modules.Comment.CommentEntry.Type;
+import fr.Alphart.BAT.Modules.Core.PermissionManager.Action;
+import fr.Alphart.BAT.Modules.Core.Importer.BanHammerImporter;
 import fr.Alphart.BAT.Modules.Core.Importer.BungeeSuiteImporter;
 import fr.Alphart.BAT.Modules.Core.Importer.GeSuiteImporter;
-import fr.Alphart.BAT.Modules.Core.Importer.ImportStatus;
+import fr.Alphart.BAT.Modules.Core.Importer.Importer;
+import fr.Alphart.BAT.Modules.Core.Importer.Importer.ImportStatus;
 import fr.Alphart.BAT.Modules.Core.Importer.MinecraftPreUUIDImporter;
-import fr.Alphart.BAT.Modules.Core.PermissionManager.Action;
+import fr.Alphart.BAT.Modules.Core.Importer.MinecraftUUIDImporter;
+import fr.Alphart.BAT.Modules.Core.Importer.SQLiteMigrater;
 import fr.Alphart.BAT.Modules.Kick.KickEntry;
 import fr.Alphart.BAT.Modules.Mute.MuteEntry;
 import fr.Alphart.BAT.Utils.CallbackUtils.Callback;
@@ -54,26 +56,25 @@ public class CoreCommand extends BATCommand{
 	private final BaseComponent[] CREDIT;
 	private final BaseComponent[] HELP_MSG;
 	private final Map<List<String>, BATCommand> subCmd;
-	private final boolean simpleAliases;
 
 	
-	public CoreCommand(final boolean simpleAliases) {
+	public CoreCommand(final Core coreModule) {
 		super("bat", "", "", null);
-		this.simpleAliases = simpleAliases;
+		final Map<String, Boolean> simpleAliasesCommands = BAT.getInstance().getConfiguration().getSimpleAliasesCommands();
 		subCmd = new HashMap<List<String>, BATCommand>();
 		CREDIT = TextComponent.fromLegacyText(ChatColor.translateAlternateColorCodes(
 				'&', "&9Bungee&fAdmin&cTools&a Version {version}&e - Developped by &aAlphart")
 				.replace("{version}", BAT.getInstance().getDescription().getVersion()));
-		HELP_MSG = TextComponent.fromLegacyText(ChatColor.translateAlternateColorCodes('&', 
-				"&eType &6" + ((simpleAliases) ? "/help" : "/bat help") + "&e to get help"));
 		
 		// Dynamic commands load, commands are not configurable as with other modules
+		final List<String> cmdsList = Lists.newArrayList();
 		for (final Class<?> subClass : CoreCommand.this.getClass().getDeclaredClasses()) {
 			try {
 				if(subClass.getAnnotation(BATCommand.Disable.class) != null){
 					continue;
 				}
 				final BATCommand command = (BATCommand) subClass.getConstructors()[0].newInstance();
+				cmdsList.add(command.getName());
 				final List<String> aliases = new ArrayList<String>(Arrays.asList(command.getAliases()));
 				aliases.add(command.getName());
 				subCmd.put(aliases, command);
@@ -86,7 +87,37 @@ public class CoreCommand extends BATCommand{
 			}
 		}
 		
-
+		Collections.sort(cmdsList);
+        // Add new commands if there are
+        for (final String cmdName : cmdsList) {
+            if (!simpleAliasesCommands.containsKey(cmdName)) {
+                simpleAliasesCommands.put(cmdName, false);
+            }
+        }
+        // Iterate through the commands map and remove the ones who don't exist (e.g because of an update)
+        for(final Iterator<Map.Entry<String, Boolean>> it = simpleAliasesCommands.entrySet().iterator(); it.hasNext();){
+            final Map.Entry<String, Boolean> cmdEntry = it.next();
+            if(!cmdsList.contains(cmdEntry.getKey())){
+                it.remove();
+            }
+        }
+        try {
+            BAT.getInstance().getConfiguration().save();
+        } catch (InvalidConfigurationException e) {
+            BAT.getInstance().getLogger().log(Level.SEVERE, "Error while saving simpleAliasesCmds", e);
+        }
+        // Register command either as subcommand or as simple alias
+        for(final Iterator<Map.Entry<List<String>, BATCommand>> it = subCmd.entrySet().iterator(); it.hasNext();){
+            final Map.Entry<List<String>, BATCommand> cmdEntry = it.next();
+            if(simpleAliasesCommands.get(cmdEntry.getValue().getName())){
+                coreModule.addCommand(cmdEntry.getValue());
+                it.remove();
+            }
+            // Otherwise, do nothing just let the command in the subcommand map
+        }
+        
+        HELP_MSG = TextComponent.fromLegacyText(ChatColor.translateAlternateColorCodes('&', 
+                "&eType &6" + ((simpleAliasesCommands.get("help")) ? "/help" : "/bat help") + "&e to get help"));
 	}
 
 	public List<BATCommand> getSubCmd() {
@@ -97,7 +128,7 @@ public class CoreCommand extends BATCommand{
 	@Override
 	public void onCommand(final CommandSender sender, final String[] args, final boolean confirmedCmd)
 			throws IllegalArgumentException {
-		if (args.length == 0 || simpleAliases) {
+		if (args.length == 0 || subCmd.isEmpty()) {
 			sender.sendMessage(CREDIT);
 			sender.sendMessage(HELP_MSG);
 		} else {
@@ -139,6 +170,8 @@ public class CoreCommand extends BATCommand{
 			for (final BATCommand cmd : BAT.getInstance().getModules().getCore().getCommands()) {
 				if (cmd instanceof CoreCommand) {
 					cmdsList.addAll(((CoreCommand) cmd).getSubCmd());
+				}else{
+				    cmdsList.add(cmd);
 				}
 			}
 			FormatUtils.showFormattedHelp(cmdsList, sender, "CORE");
@@ -206,15 +239,14 @@ public class CoreCommand extends BATCommand{
 	
 	@RunAsync
 	public static class LookupCmd extends BATCommand {
-		private final ModulesManager modules;
-		private final Calendar localTime = Calendar.getInstance(TimeZone.getDefault());
-		private static final int entriesPerPage = 15;
-		private final String lookupHeader = "\n&f---- &9Lookup &f- &b{entity} &f-&a {module} &f-&6 Page {page} &f----\n";
-		private final String lookupFooter = "\n&f---- &9Lookup &f- &b{entity} &f-&a {module} &f-&6 Page {page} &f----";
+	    @Getter
+		private static LookupFormatter lookupFormatter;
+		private ModulesManager modules;
 		
 		public LookupCmd() {
 			super("lookup", "<player/ip> [module] [page]", "Displays a player or an ip related information (universal or per module).", Action.LOOKUP.getPermission());
 			modules = BAT.getInstance().getModules();
+			lookupFormatter = new LookupFormatter();
 		}
 
 		@Override
@@ -222,15 +254,15 @@ public class CoreCommand extends BATCommand{
 				throws IllegalArgumentException {
 			final String entity = args[0];
 			if (Utils.validIP(entity)) {
-				checkArgument(sender.hasPermission(Action.LOOKUP.getPermission() + ".ip"), _("noPerm"));
+				checkArgument(sender.hasPermission("bat.admin") || sender.hasPermission(Action.LOOKUP.getPermission() + ".ip"), _("noPerm"));
 				if(args.length == 1){
-					for (final BaseComponent[] msg : getSummaryLookupIP(entity)) {
+					for (final BaseComponent[] msg : lookupFormatter.getSummaryLookupIP(entity)) {
 						sender.sendMessage(msg);
 					}
 				}
 			} else {
 				if(args.length == 1){
-					for (final BaseComponent[] msg : getSummaryLookupPlayer(entity, sender.hasPermission(Action.LOOKUP.getPermission() + ".displayip"))) {
+					for (final BaseComponent[] msg : lookupFormatter.getSummaryLookupPlayer(entity, sender.hasPermission(Action.LOOKUP.getPermission() + ".displayip"))) {
 						sender.sendMessage(msg);
 					}
 				}
@@ -253,7 +285,7 @@ public class CoreCommand extends BATCommand{
 					case "ban":
 						final List<BanEntry> bans = modules.getBanModule().getBanData(entity);
 						if(!bans.isEmpty()){
-							message = formatBanLookup(entity, bans, page, lookupHeader, lookupFooter, false);
+							message = lookupFormatter.formatBanLookup(entity, bans, page, false);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__((!Utils.validIP(entity))
@@ -264,7 +296,7 @@ public class CoreCommand extends BATCommand{
 					case "mute":
 						final List<MuteEntry> mutes = modules.getMuteModule().getMuteData(entity);
 						if(!mutes.isEmpty()){
-							message = formatMuteLookup(entity, mutes, page, lookupHeader, lookupFooter, false);
+							message = lookupFormatter.formatMuteLookup(entity, mutes, page, false);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__((!Utils.validIP(entity))
@@ -275,7 +307,7 @@ public class CoreCommand extends BATCommand{
 					case "kick":
 						final List<KickEntry> kicks = modules.getKickModule().getKickData(entity);
 						if(!kicks.isEmpty()){
-							message = formatKickLookup(entity, kicks, page, lookupHeader, lookupFooter, false);
+							message = lookupFormatter.formatKickLookup(entity, kicks, page, false);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__((!Utils.validIP(entity))
@@ -286,7 +318,7 @@ public class CoreCommand extends BATCommand{
 					case "comment":
 						final List<CommentEntry> comments = modules.getCommentModule().getComments(entity);
 						if(!comments.isEmpty()){
-							message = commentRowLookup(entity, comments, page, lookupHeader, lookupFooter, false);
+							message = lookupFormatter.commentRowLookup(entity, comments, page, false);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__((!Utils.validIP(entity))
@@ -307,509 +339,11 @@ public class CoreCommand extends BATCommand{
 			}
 		}
 
-		public List<BaseComponent[]> getSummaryLookupIP(final String ip) {
-			final StringBuilder msg = new StringBuilder();
-			msg.append(lookupHeader.replace("{entity}", ip).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			final EntityEntry ipDetails = new EntityEntry(ip);
-
-			if (!ipDetails.exist()) {
-				final List<BaseComponent[]> returnedMsg = new ArrayList<BaseComponent[]>();
-				returnedMsg.add(__("&eThe IP &a" + ip + "&e doesn't have any recording."));
-				return returnedMsg;
-			}
-
-			boolean isBan = false;
-			int bansNumber = 0;
-			final List<String> banServers = new ArrayList<String>();
-			boolean isMute = false;
-			int mutesNumber = 0;
-			final List<String> muteServers = new ArrayList<String>();
-
-			if (!ipDetails.getBans().isEmpty()) {
-				for (final BanEntry banEntry : ipDetails.getBans()) {
-					if (banEntry.isActive()) {
-						isBan = true;
-						banServers.add(banEntry.getServer());
-					}
-				}
-				bansNumber = ipDetails.getBans().size();
-			}
-			if (!ipDetails.getMutes().isEmpty()) {
-				for (final MuteEntry muteEntry : ipDetails.getMutes()) {
-					if (muteEntry.isActive()) {
-						isMute = true;
-						muteServers.add(muteEntry.getServer());
-					}
-				}
-				mutesNumber = ipDetails.getMutes().size();
-			}
-
-			msg.append("&eThis IP is used by the following players : \n&3 ");
-			msg.append(Joiner.on("&f, &3").join(ipDetails.getUsers()));
-
-			if (isBan || isMute) {
-				msg.append("\n&eState : ");
-				if (isBan) {
-					msg.append("\n&c&lBanned &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(banServers).toLowerCase());
-				}
-				if (isMute) {
-					msg.append("\n&c&lMute &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(muteServers).toLowerCase());
-				}
-			}
-
-			if (bansNumber > 0 || mutesNumber > 0) {
-				msg.append("\n&eHistory : ");
-				if (bansNumber > 0) {
-					msg.append("&B&l");
-					msg.append(bansNumber);
-					msg.append((bansNumber > 1) ? "&e bans" : "&e ban");
-				}
-				if (mutesNumber > 0) {
-					msg.append("\n&B&l            ");
-					msg.append(mutesNumber);
-					msg.append((mutesNumber > 1) ? "&e mutes" : "&e mute");
-				}
-			} else {
-				msg.append("\n&eNo sanctions ever imposed.");
-			}
-
-			msg.append(lookupFooter.replace("{entity}", ip).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-		public List<BaseComponent[]> getSummaryLookupPlayer(final String pName, final boolean displayID) {
-			final StringBuilder msg = new StringBuilder();
-			msg.append(lookupHeader.replace("{entity}", pName).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			// Get players data related to each modules
-			final EntityEntry pDetails = new EntityEntry(pName);
-
-			if (!pDetails.exist()) {
-				final List<BaseComponent[]> returnedMsg = new ArrayList<BaseComponent[]>();
-				returnedMsg.add(__("playerNotFound"));
-				return returnedMsg;
-			}
-
-			final EntityEntry ipDetails = new EntityEntry(Core.getPlayerIP(pName));
-
-			boolean isBan = false;
-			boolean isBanIP = false;
-			int bansNumber = 0;
-			final List<String> banServers = Lists.newArrayList();
-			final List<String> banIPServers = Lists.newArrayList();
-			boolean isMute = false;
-			boolean isMuteIP = false;
-			int mutesNumber = 0;
-			final List<String> muteServers = Lists.newArrayList();
-			final List<String> muteIPServers = Lists.newArrayList();
-			int kicksNumber = 0;
-
-			for (final BanEntry banEntry : pDetails.getBans()) {
-				if (banEntry.isActive()) {
-					isBan = true;
-					banServers.add(banEntry.getServer());
-				}
-			}
-			for (final BanEntry banEntry : ipDetails.getBans()) {
-				if (banEntry.isActive()) {
-					isBanIP = true;
-					banIPServers.add(banEntry.getServer());
-				}
-			}
-			for (final MuteEntry muteEntry : pDetails.getMutes()) {
-				if (muteEntry.isActive()) {
-					isMute = true;
-					muteServers.add(muteEntry.getServer());
-				}
-			}
-			for (final MuteEntry muteEntry : ipDetails.getMutes()) {
-				if (muteEntry.isActive()) {
-					isMuteIP = true;
-					muteIPServers.add(muteEntry.getServer());
-				}
-			}
-			bansNumber = pDetails.getBans().size() + ipDetails.getBans().size();
-			mutesNumber = pDetails.getMutes().size() + ipDetails.getMutes().size();
-			kicksNumber = pDetails.getKicks().size();
-
-			// Construction of the message
-			if (BAT.getInstance().getRedis().isRedisEnabled()) {
-			    	UUID pUUID = RedisBungee.getApi().getUuidFromName(pName, true);
-			    	msg.append((pUUID != null && RedisBungee.getApi().isPlayerOnline(pUUID)) ? "&a&lConnected &r&eon the &3"
-					+ RedisBungee.getApi().getServerFor(pUUID).getName() + " &eserver" : "&8&lOffline");
-			} else {
-			    	msg.append((ProxyServer.getInstance().getPlayer(pName) != null) ? "&a&lConnected &r&eon the &3"
-					+ ProxyServer.getInstance().getPlayer(pName).getServer().getInfo().getName() + " &eserver" : "&8&lOffline");
-			}
-			
-			if (isBan || isMute || isBanIP || isMuteIP) {
-				msg.append("\n&eState : ");
-				if (isBan) {
-					msg.append("\n&c&lBanned &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(banServers).toLowerCase());
-				}
-				if (isBanIP) {
-					msg.append("\n&c&lBanned IP &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(banIPServers).toLowerCase());
-				}
-				if (isMute) {
-					msg.append("\n&c&lMute &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(muteServers).toLowerCase());
-				}
-				if (isMuteIP) {
-					msg.append("\n&c&lMute IP &efrom &3");
-					msg.append(Joiner.on("&f, &3").join(muteIPServers).toLowerCase());
-				}
-			}
-
-			
-			msg.append("\n&eFirst login : &a");
-			if(pDetails.getFirstLogin() != EntityEntry.noDateFound){
-				localTime.setTimeInMillis(pDetails.getFirstLogin().getTime());
-				msg.append(Core.defaultDF.format(localTime.getTime()));
-			}else{
-				msg.append("&cNever connected");
-			}
-
-			msg.append("\n&eLast login : &a");
-			if(pDetails.getLastLogin() != EntityEntry.noDateFound){
-				localTime.setTimeInMillis(pDetails.getLastLogin().getTime());
-				msg.append(Core.defaultDF.format(localTime.getTime()));
-			}else{
-				msg.append("&cNever connected");
-			}
-
-			msg.append("\n&eLast IP : &a");
-			if("0.0.0.0".equals(pDetails.getLastIP())){
-				msg.append("&cNever connected");
-			}else{
-				msg.append((displayID) ? pDetails.getLastIP() : "&7Hidden");
-			}
-
-			if (bansNumber > 0 || mutesNumber > 0 || kicksNumber > 0 || pDetails.getComments().size() > 0) {
-				msg.append("\n&eHistory : ");
-				if (bansNumber > 0) {
-					msg.append("&B&l");
-					msg.append(bansNumber);
-					msg.append((bansNumber > 1) ? "&e bans" : "&e ban");
-				}
-				if (mutesNumber > 0) {
-					msg.append("\n&B&l            ");
-					msg.append(mutesNumber);
-					msg.append((mutesNumber > 1) ? "&e mutes" : "&e mute");
-				}
-				if (kicksNumber > 0) {
-					msg.append("\n&B&l            ");
-					msg.append(kicksNumber);
-					msg.append((kicksNumber > 1) ? "&e kicks" : "&e kick");
-				}
-				if(pDetails.getComments().size() > 0){
-					msg.append("\n&aLast three comments: ");
-					int commentsDisplayed = 0;
-					for(final CommentEntry comm : pDetails.getComments()){
-						msg.append("\n");
-						msg.append(_("commentRow", new String[]{String.valueOf(comm.getID()), 
-								(comm.getType() == Type.NOTE) ? "&eComment" : "&cWarning", comm.getContent(),
-								comm.getFormattedDate(), comm.getAuthor()}));
-						commentsDisplayed++;
-						if(commentsDisplayed == 3){
-							break;
-						}
-					}
-				}
-			} else {
-				msg.append("\n&eNo sanctions ever imposed.");
-			}
-
-			msg.append(lookupFooter.replace("{entity}", pName).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-
-		public static List<BaseComponent[]> formatBanLookup(final String entity, final List<BanEntry> bans,
-				int page, final String header, final String footer, final boolean staffLookup) throws InvalidModuleException {
-			final StringBuilder msg = new StringBuilder();
-
-			int totalPages = (int) Math.ceil((double)bans.size()/entriesPerPage);
-			if(bans.size() > entriesPerPage){
-				if(page > totalPages){
-					page = totalPages;
-				}
-				int beginIndex = (page - 1) * entriesPerPage;
-				int endIndex = (beginIndex + entriesPerPage < bans.size()) ? beginIndex + entriesPerPage : bans.size();
-				for(int i=bans.size() -1; i > 0; i--){
-					if(i >= beginIndex && i < endIndex){
-						continue;
-					}
-					bans.remove(i);
-				}
-			}
-			msg.append(header.replace("{entity}", entity).replace("{module}", "Ban")
-					.replace("{page}", page + "/" + totalPages));
-			
-			boolean isBan = false;
-			for (final BanEntry banEntry : bans) {
-				if (banEntry.isActive()) {
-					isBan = true;
-				}
-			}
-
-			// We begin with active ban
-			if(isBan){
-				msg.append("&6&lActive bans: &e");
-				final Iterator<BanEntry> it = bans.iterator();
-				while(it.hasNext()){
-					final BanEntry ban = it.next();
-					if(!ban.isActive()){
-						break;
-					}
-					final String begin = Core.defaultDF.format(ban.getBeginDate());
-					final String server = ban.getServer();
-					final String reason = ban.getReason();	
-					final String end;
-					if(ban.getEndDate() == null){
-						end = "permanent ban";
-					}else{
-						end = Core.defaultDF.format(ban.getEndDate());
-					}
-					
-					msg.append("\n");
-					if(staffLookup){
-						msg.append(_("activeStaffBanLookupRow", 
-								new String[] { ban.getEntity(), begin, server, reason, end}));
-					}else{
-						msg.append(_("activeBanLookupRow", 
-								new String[] { begin, server, reason, ban.getStaff(), end}));
-					}
-					it.remove();
-				}
-			}
-			
-			if(!bans.isEmpty()){
-				msg.append("\n&7&lArchive bans: &e");
-				for(final BanEntry ban : bans){
-					final String begin = Core.defaultDF.format(ban.getBeginDate());
-					final String server = ban.getServer();
-					final String reason = ban.getReason();
-					
-					final String endDate;
-					if(ban.getEndDate() == null){
-						endDate = Core.defaultDF.format(ban.getUnbanDate());
-					}else{
-						endDate = Core.defaultDF.format(ban.getEndDate());
-					}
-					final String unbanReason = ban.getUnbanReason();
-					String unbanStaff = ban.getUnbanStaff();
-					if(unbanStaff == null){
-						unbanStaff = "temporary ban";
-					}
-					
-					msg.append("\n");
-					if(staffLookup){
-						msg.append(_("archiveStaffBanLookupRow", 
-								new String[] { ban.getEntity(), begin, server, reason, endDate, unbanReason, unbanStaff}));
-					}else{
-						msg.append(_((staffLookup) ? "archiveStaffBanLookupRow" : "archiveBanLookupRow", 
-								new String[] { begin, server, reason, ban.getStaff(), endDate, unbanReason, unbanStaff}));
-					}
-					
-				}
-			}
-
-			msg.append(footer.replace("{entity}", entity).replace("{module}", "Ban")
-					.replace("{page}", page + "/" + totalPages));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-		public static List<BaseComponent[]> formatMuteLookup(final String entity, final List<MuteEntry> mutes,
-				int page, final String header, final String footer, final boolean staffLookup) throws InvalidModuleException {
-			final StringBuilder msg = new StringBuilder();
-
-			int totalPages = (int) Math.ceil((double)mutes.size()/entriesPerPage);
-			if(mutes.size() > entriesPerPage){
-				if(page > totalPages){
-					page = totalPages;
-				}
-				int beginIndex = (page - 1) * entriesPerPage;
-				int endIndex = (beginIndex + entriesPerPage < mutes.size()) ? beginIndex + entriesPerPage : mutes.size();
-				for(int i=mutes.size() -1; i > 0; i--){
-					if(i >= beginIndex && i < endIndex){
-						continue;
-					}
-					mutes.remove(i);
-				}
-			}
-			msg.append(header.replace("{entity}", entity).replace("{module}", "Mute")
-					.replace("{page}", page + "/" + totalPages));
-			
-			boolean isMute = false;
-			for (final MuteEntry muteEntry : mutes) {
-				if (muteEntry.isActive()) {
-					isMute = true;
-				}
-			}
-
-			// We begin with active ban
-			if(isMute){
-				msg.append("&6&lActive mutes: &e");
-				final Iterator<MuteEntry> it = mutes.iterator();
-				while(it.hasNext()){
-					final MuteEntry mute = it.next();
-					if(!mute.isActive()){
-						break;
-					}
-					final String begin = Core.defaultDF.format(mute.getBeginDate());
-					final String server = mute.getServer();
-					final String reason = mute.getReason();
-					final String end;
-					if(mute.getEndDate() == null){
-						end = "permanent mute";
-					}else{
-						end = Core.defaultDF.format(mute.getEndDate());
-					}
-					
-					msg.append("\n");
-					if(staffLookup){
-						msg.append(_("activeStaffMuteLookupRow", 
-								new String[] { mute.getEntity(), begin, server, reason, end}));
-					}else{
-						msg.append(_("activeMuteLookupRow", 
-								new String[] { begin, server, reason, mute.getStaff(), end}));
-					}
-					it.remove();
-				}
-			}
-			
-			if(!mutes.isEmpty()){
-				msg.append("\n&7&lArchive mutes: &e");
-				for(final MuteEntry mute : mutes){
-					final String begin = Core.defaultDF.format(mute.getBeginDate());
-					final String server = mute.getServer();
-					final String reason = mute.getReason();
-					
-					final String unmuteDate;
-					if(mute.getUnmuteDate() == null){
-						unmuteDate = Core.defaultDF.format(mute.getEndDate());
-					}else{
-						unmuteDate = Core.defaultDF.format(mute.getUnmuteDate());
-					}
-					final String unmuteReason = mute.getUnmuteReason();
-					String unmuteStaff = mute.getUnmuteStaff();
-					if(unmuteStaff == "null"){
-						unmuteStaff = "temporary mute";
-					}
-					
-					msg.append("\n");
-					if(staffLookup){
-						msg.append(_("archiveStaffMuteLookupRow", 
-								new String[] { mute.getEntity(), begin, server, reason, unmuteDate, unmuteReason, unmuteStaff}));
-					}else{
-						msg.append(_("archiveMuteLookupRow", 
-								new String[] { begin, server, reason, mute.getStaff(), unmuteDate, unmuteReason, unmuteStaff}));
-					}
-				}
-			}
-
-			msg.append(footer.replace("{entity}", entity).replace("{module}", "Mute")
-					.replace("{page}", page + "/" + totalPages));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-		public static List<BaseComponent[]> formatKickLookup(final String entity, final List<KickEntry> kicks,
-				int page, final String header, final String footer, final boolean staffLookup) throws InvalidModuleException {
-			final StringBuilder msg = new StringBuilder();
-
-			int totalPages = (int) Math.ceil((double)kicks.size()/entriesPerPage);
-			if(kicks.size() > entriesPerPage){
-				if(page > totalPages){
-					page = totalPages;
-				}
-				int beginIndex = (page - 1) * entriesPerPage;
-				int endIndex = (beginIndex + entriesPerPage < kicks.size()) ? beginIndex + entriesPerPage : kicks.size();
-				for(int i=kicks.size() -1; i > 0; i--){
-					if(i >= beginIndex && i < endIndex){
-						continue;
-					}
-					kicks.remove(i);
-				}
-			}
-			msg.append(header.replace("{entity}", entity).replace("{module}", "Kick")
-					.replace("{page}", page + "/" + totalPages));
-			
-			msg.append("&6&lKick list :");
-			
-			for(final KickEntry kick : kicks){
-				final String date = Core.defaultDF.format(kick.getDate());
-				final String server = kick.getServer();
-				final String reason = kick.getReason();
-				
-				msg.append("\n");
-				if(staffLookup){
-					msg.append(_("kickStaffLookupRow", 
-							new String[] { kick.getEntity(), date, server, reason}));
-				}else{
-					msg.append(_("kickLookupRow", 
-							new String[] { date, server, reason, kick.getStaff()}));
-				}
-			}
-
-			msg.append(footer.replace("{entity}", entity).replace("{module}", "Kick")
-					.replace("{page}", page + "/" + totalPages));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-		public static List<BaseComponent[]> commentRowLookup(final String entity, final List<CommentEntry> comments,
-				int page, final String header, final String footer, final boolean staffLookup) throws InvalidModuleException {{
-			final StringBuilder msg = new StringBuilder();
-
-			int totalPages = (int) Math.ceil((double)comments.size()/entriesPerPage);
-			if(comments.size() > entriesPerPage){
-				if(page > totalPages){
-					page = totalPages;
-				}
-				int beginIndex = (page - 1) * entriesPerPage;
-				int endIndex = (beginIndex + entriesPerPage < comments.size()) ? beginIndex + entriesPerPage : comments.size();
-				for(int i=comments.size() -1; i > 0; i--){
-					if(i >= beginIndex && i < endIndex){
-						continue;
-					}
-					comments.remove(i);
-				}
-			}
-			msg.append(header.replace("{entity}", entity).replace("{module}", "Comment")
-					.replace("{page}", page + "/" + totalPages));
-			
-			msg.append("&6&lComment list :");
-			
-			for(final CommentEntry comm : comments){
-				msg.append("\n");
-				if(staffLookup){
-					msg.append(_("commentRow", new String[]{String.valueOf(comm.getID()), 
-							(comm.getType() == Type.NOTE) ? "&eComment" : "&cWarning", comm.getContent(),
-							comm.getFormattedDate(), comm.getAuthor()}));
-				}
-				else{
-					msg.append(_("commentStaffRow", new String[]{String.valueOf(comm.getID()), 
-							(comm.getType() == Type.NOTE) ? "&eComment" : "&cWarning", 
-							comm.getEntity(), comm.getContent(), comm.getFormattedDate()}));
-				}
-			}
-
-			msg.append(footer.replace("{entity}", entity).replace("{module}", "Comment")
-					.replace("{page}", page + "/" + totalPages));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
-		}
-	}
 	}
 		
+	@RunAsync
 	public static class StaffLookupCmd extends BATCommand {
 		private final ModulesManager modules;
-		private final String lookupHeader = "\n&f---- &9Staff Lookup &f- &b{entity} &f-&a {module} &f-&6 Page {page} &f----\n";
-		private final String lookupFooter = "\n&f---- &9Staff Lookup &f- &b{entity} &f-&a {module} &f-&6 Page {page} &f----";
 		
 		public StaffLookupCmd() {
 			super("stafflookup", "<staff> [module] [page]", "Displays a staff member history (universal or per module).", "bat.stafflookup");
@@ -820,7 +354,8 @@ public class CoreCommand extends BATCommand{
 		public void onCommand(final CommandSender sender, final String[] args, final boolean confirmedCmd) throws IllegalArgumentException {
 			final String entity = args[0];
 			if(args.length == 1){
-				for (final BaseComponent[] msg : getSummaryStaffLookup(entity, sender.hasPermission(Action.LOOKUP.getPermission() + ".displayip"))) {
+				for (final BaseComponent[] msg : LookupCmd.getLookupFormatter().getSummaryStaffLookup(entity, 
+				        sender.hasPermission(Action.LOOKUP.getPermission() + ".displayip"))) {
 					sender.sendMessage(msg);
 				}
 			}
@@ -842,7 +377,7 @@ public class CoreCommand extends BATCommand{
 					case "ban":
 						final List<BanEntry> bans = modules.getBanModule().getManagedBan(entity);
 						if(!bans.isEmpty()){
-							message = LookupCmd.formatBanLookup(entity, bans, page, lookupHeader, lookupFooter, true);
+							message = LookupCmd.getLookupFormatter().formatBanLookup(entity, bans, page, true);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__("&b" + entity + "&e has never performed any operation concerning ban."));
@@ -851,7 +386,7 @@ public class CoreCommand extends BATCommand{
 					case "mute":
 						final List<MuteEntry> mutes = modules.getMuteModule().getManagedMute(entity);
 						if(!mutes.isEmpty()){
-							message = LookupCmd.formatMuteLookup(entity, mutes, page, lookupHeader, lookupFooter, true);
+							message = LookupCmd.getLookupFormatter().formatMuteLookup(entity, mutes, page, true);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__("&b" + entity + "&e has never performed any operation concerning mute."));
@@ -860,7 +395,7 @@ public class CoreCommand extends BATCommand{
 					case "kick":
 						final List<KickEntry> kicks = modules.getKickModule().getManagedKick(entity);
 						if(!kicks.isEmpty()){
-							message = LookupCmd.formatKickLookup(entity, kicks, page, lookupHeader, lookupFooter, true);
+							message = LookupCmd.getLookupFormatter().formatKickLookup(entity, kicks, page, true);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__("&b" + entity + "&e has never performed any operation concerning kick."));
@@ -869,7 +404,7 @@ public class CoreCommand extends BATCommand{
 					case "comment":
 						final List<CommentEntry> comments = modules.getCommentModule().getManagedComments(entity);
 						if(!comments.isEmpty()){
-							message = LookupCmd.commentRowLookup(entity, comments, page, lookupHeader, lookupFooter, true);
+							message = LookupCmd.getLookupFormatter().commentRowLookup(entity, comments, page, true);
 						}else{
 							message = new ArrayList<BaseComponent[]>();
 							message.add(BAT.__("&b" + entity + "&e has never performed any operation concerning comment."));
@@ -886,73 +421,6 @@ public class CoreCommand extends BATCommand{
 					throw new IllegalArgumentException(e.getMessage());
 				}
 			}
-		}
-		
-		public List<BaseComponent[]> getSummaryStaffLookup(final String staff, final boolean displayID) {
-			final StringBuilder msg = new StringBuilder();
-			msg.append(lookupHeader.replace("{entity}", staff).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			msg.append("&eStatistics :");
-			try{
-				if(modules.isLoaded("ban")){
-					int banNo = 0;
-					int unbanNo = 0;
-					for(final BanEntry ban : modules.getBanModule().getManagedBan(staff)){
-						if(staff.equalsIgnoreCase(ban.getStaff())){
-							banNo++;
-						}
-						if(staff.equalsIgnoreCase(ban.getUnbanStaff())){
-							unbanNo++;
-						}
-					}
-					msg.append("\n&b" + staff + "&e has issued &c" + banNo + " bans &eand &a" + unbanNo + " unbans.");
-				}
-				if(modules.isLoaded("mute")){
-					int muteNo = 0;
-					int unmuteNo = 0;
-					for(final MuteEntry mute : modules.getMuteModule().getManagedMute(staff)){
-						if(staff.equalsIgnoreCase(mute.getStaff())){
-							muteNo++;
-						}
-						if(staff.equalsIgnoreCase(mute.getUnmuteStaff())){
-							unmuteNo++;
-						}
-					}
-					msg.append("\n&b" + staff + "&e has issued &c" + muteNo + " mutes &eand &a" + unmuteNo + " unmutes.");
-				}
-				if(modules.isLoaded("kick")){
-					int kickNo = 0;
-					for(final KickEntry kick : modules.getKickModule().getManagedKick(staff)){
-						if(staff.equalsIgnoreCase(kick.getStaff())){
-							kickNo++;
-						}
-					}
-					msg.append("\n&b" + staff + "&e has issued &c" + kickNo + " kicks.");
-				}
-				if(modules.isLoaded("comment")){
-					int commentNo = 0;
-					int warningNo = 0;
-					for(final CommentEntry mute : modules.getCommentModule().getManagedComments(staff)){
-						if(mute.getType() == Type.NOTE){
-							commentNo++;
-						}
-						else{
-							warningNo++;
-						}
-					}
-					msg.append("\n&b" + staff + "&e has written &c" + commentNo + " comments &eand &a" + warningNo + " warnings.");
-				}
-				// It means the only loaded module is core
-				if(modules.getLoadedModules().size() == 1){
-					msg.append("\nNo informations were found on this staff memeber.");
-				}
-			}catch(final InvalidModuleException e){
-				e.printStackTrace();
-			}
-			
-			msg.append(lookupFooter.replace("{entity}", staff).replace("{module}", "Summary").replace("{page}", "1/1"));
-
-			return FormatUtils.formatNewLine(ChatColor.translateAlternateColorCodes('&', msg.toString()));
 		}
 	}
 	
@@ -977,16 +445,20 @@ public class CoreCommand extends BATCommand{
             put("bungeeSuiteBans", new BungeeSuiteImporter());
             put("geSuitBans", new GeSuiteImporter());
             put("MC-Previous1.7.8", new MinecraftPreUUIDImporter());
+            put("BanHammer", new BanHammerImporter());
+            put("BATSQLite", new SQLiteMigrater());
+            put("MC-Post1.7.8", new MinecraftUUIDImporter());
 	    }};
 	    
 		public ImportCmd() { 
-		    super("import", "<bungeeSuiteBans/geSuitBans/MC-Previous1.7>", "Imports ban data from the specified source. Available sources : &a" 
+		    super("import", "<" + Joiner.on('/').join(importers.keySet()) + ">", "Imports ban data from the specified source. Available sources : &a" 
 		            + Joiner.on("&e,&a").join(importers.keySet()), "bat.import");
 		}
 
 		@Override
 		public void onCommand(final CommandSender sender, final String[] args, final boolean confirmedCmd)
 				throws IllegalArgumentException {
+		    checkArgument(BAT.getInstance().getConfiguration().isMysql_enabled(), "You must use MySQL in order to use the import function.");
 			final String source = args[0];
 			
 			final Importer importer = importers.get(source);
@@ -999,11 +471,14 @@ public class CoreCommand extends BATCommand{
                     public void done(ImportStatus result, Throwable throwable) {
                         if(throwable != null){
                             if(throwable instanceof RuntimeException){
-                                if(throwable.getMessage() != null){
-                                    sender.sendMessage(BAT.__("An error has occured during the import. Please check the logs"));
-                                }else{
-                                    sender.sendMessage(BAT.__(throwable.getMessage()));
-                                }
+                                sender.sendMessage(BAT.__("An error (" + throwable.getMessage()
+                                        + ") has occured during the import. Please check the logs"));
+                                throwable.printStackTrace();
+                            }else{
+                                sender.sendMessage(BAT.__("An error has occured during the import. Please check the logs"));
+                                BAT.getInstance().getLogger().severe("An error has occured during the import of data from " + source 
+                                        + ". Please report this :");
+                                throwable.printStackTrace();
                             }
                         }else{
                             sender.sendMessage(BAT.__("Congratulations, the migration is finished. &a" 
@@ -1024,7 +499,7 @@ public class CoreCommand extends BATCommand{
                     public void onMinorError(String errorMessage) {
                         sender.sendMessage(BAT.__(errorMessage));
                     }
-                });
+                }, Utils.getFinalArg(args, 1));
 			}else{
 			    throw new IllegalArgumentException("The specified source is incorrect. Available sources : &a" 
 	                + Joiner.on("&e,&a").join(importers.keySet()));
@@ -1052,21 +527,16 @@ public class CoreCommand extends BATCommand{
 		}
 	}
 	
-	@Disable
 	@RunAsync
 	public static class MigrateCmd extends BATCommand {
-		public MigrateCmd() { super("migrate", "<target>", "Migrate from the source to the target datasource (mysql or sqlite)", "bat.migrate");}
+		public MigrateCmd() { super("migrateToMysql", "", "Migrate from sqlite to mysql (one-way conversion)", "bat.import");}
 
 		@Override
 		public void onCommand(final CommandSender sender, final String[] args, final boolean confirmedCmd) throws IllegalArgumentException {
-			final String target = args[1];
-			checkArgument(!Arrays.asList("mysql", "sqlite").contains(target.toLowerCase()), "Target must be mysql or sqlite.");	
-			if("sqlite".equalsIgnoreCase(target)){
-				checkArgument(!DataSourceHandler.isSQLite(), "SQLite is already used.");
-			}else if("mysql".equalsIgnoreCase(target)){
-				checkArgument(DataSourceHandler.isSQLite(), "MySQL is already used.");
-			}
-			BAT.getInstance().migrate(target);
+		    boolean isImportSimpleAlias = BAT.getInstance().getConfiguration().getSimpleAliasesCommands().get("import");
+			ProxyServer.getInstance().getPluginManager().dispatchCommand(sender, 
+			        ((!isImportSimpleAlias) ? "bat " : "") + "import BATSQLite");
 		}
+
 	}
 }

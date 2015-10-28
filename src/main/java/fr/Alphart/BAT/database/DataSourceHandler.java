@@ -15,7 +15,10 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 import java.util.TimeZone;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 
+import com.zaxxer.hikari.HikariDataSource;
 import net.md_5.bungee.api.ProxyServer;
 
 import org.apache.log4j.BasicConfigurator;
@@ -24,14 +27,14 @@ import org.apache.log4j.varia.NullAppender;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.io.CharStreams;
-import com.jolbox.bonecp.BoneCPDataSource;
+import com.mysql.jdbc.exceptions.jdbc4.CommunicationsException;
 
 import fr.Alphart.BAT.BAT;
 import fr.Alphart.BAT.Utils.CallbackUtils.Callback;
 
 public class DataSourceHandler {
 	// Connection informations
-	private BoneCPDataSource ds;
+	private HikariDataSource ds;
 	private String username;
 	private String password;
 	private String database;
@@ -49,8 +52,9 @@ public class DataSourceHandler {
 	 * @param database
 	 * @param username
 	 * @param password
+	 * @throws SQLException 
 	 */
-	public DataSourceHandler(final String host, final String port, final String database, final String username, final String password) {
+	public DataSourceHandler(final String host, final String port, final String database, final String username, final String password) throws SQLException{
 		// Check database's informations and init connection
 		this.host = Preconditions.checkNotNull(host);
 		this.port = Preconditions.checkNotNull(port);
@@ -58,17 +62,15 @@ public class DataSourceHandler {
 		this.username = Preconditions.checkNotNull(username);
 		this.password = Preconditions.checkNotNull(password);
 
+		BAT.getInstance().getLogger().config("Initialization of HikariCP in progress ...");
 		BasicConfigurator.configure(new NullAppender());
-		ds = new BoneCPDataSource();
+		ds = new HikariDataSource();
 		ds.setJdbcUrl("jdbc:mysql://" + this.host + ":" + this.port + "/" + this.database + 
 				"?useLegacyDatetimeCode=false&serverTimezone=" + TimeZone.getDefault().getID());
 		ds.setUsername(this.username);
 		ds.setPassword(this.password);
-		ds.close();
-		ds.setPartitionCount(2);
-		ds.setMinConnectionsPerPartition(3);
-		ds.setMaxConnectionsPerPartition(7);
-		ds.setConnectionTestStatement("SELECT 1");
+		ds.addDataSourceProperty("cachePrepStmts", "true");
+		ds.setMaximumPoolSize(8);
 		try {
 			final Connection conn = ds.getConnection();
 		    int intOffset = Calendar.getInstance().getTimeZone().getOffset(Calendar.getInstance().getTimeInMillis()) / 1000;
@@ -76,12 +78,17 @@ public class DataSourceHandler {
 		    offset = (intOffset >= 0 ? "+" : "-") + offset;
 			conn.createStatement().executeQuery("SET time_zone='" + offset + "';");
 			conn.close();
+			BAT.getInstance().getLogger().config("BoneCP is loaded !");
 		} catch (final SQLException e) {
 			BAT.getInstance().getLogger().severe("BAT encounters a problem during the initialization of the database connection."
 					+ " Please check your logins and database configuration.");
-			if(e.getMessage() != null){
-				BAT.getInstance().getLogger().severe("Error message : " + e.getMessage());
+			if(e.getCause() instanceof CommunicationsException){
+			    BAT.getInstance().getLogger().severe(e.getCause().getMessage());
 			}
+			if(BAT.getInstance().getConfiguration().isDebugMode()){
+			    BAT.getInstance().getLogger().log(Level.SEVERE, e.getMessage(), e);
+			}
+			throw e;
 		}
 		sqlite = false;
 	}
@@ -124,10 +131,14 @@ public class DataSourceHandler {
 			}
 			return ds.getConnection();
 		} catch (final SQLException e) {
-			BAT.getInstance()
-			.getLogger()
-			.severe("BAT can't etablish connection with the database. Please report this and include the following lines :");
-			e.printStackTrace();
+			BAT.getInstance().getLogger().severe(
+			        "BAT can't etablish connection with the database. Please report this and include the following lines :");
+			if(e.getCause() instanceof CommunicationsException){
+			    BAT.getInstance().getLogger().severe(e.getCause().getMessage());
+			}
+            if (BAT.getInstance().getConfiguration().isDebugMode()) {
+                e.printStackTrace();
+            }
 			return null;
 		}
 	}

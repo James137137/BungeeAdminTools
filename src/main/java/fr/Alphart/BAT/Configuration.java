@@ -2,6 +2,9 @@ package fr.Alphart.BAT;
 
 import java.io.File;
 import java.util.Locale;
+import java.util.Map;
+
+import com.google.common.collect.Maps;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -29,13 +32,16 @@ public class Configuration extends Config{
 	private boolean mustGiveReason= false;
 	@Comment("Enable /bat confirm, to confirm command such as action on unknown player.")
 	private boolean confirmCommand = true;
-	@Comment("Enable simple aliases to bypass the /bat prefix to core commands")
-	private boolean simpleAliases = false;
+	@Comment("Enable or disable simple aliases to bypass the /bat prefix for core commands")
+	private Map<String, Boolean> simpleAliasesCommands = Maps.newHashMap();
 	@Comment("Make the date more readable."
 			+ "If the date correspond to today, tmw or yda, it will replace the date by the corresponding word")
 	private boolean litteralDate = true;
 	@Comment("Enable BETA (experimental) Redis support, requires RedisBungee")
 	private boolean redisSupport = false;
+	@Comment("The debug mode enables verbose logging. All the logged message will be in the debug.log file in BAT folder")
+	private boolean debugMode = false;
+	
 	
 	@Comment("Set to true to use MySQL. Otherwise SQL Lite will be used")
 	@Setter

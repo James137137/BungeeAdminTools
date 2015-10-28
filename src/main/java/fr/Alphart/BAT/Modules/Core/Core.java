@@ -1,5 +1,10 @@
 package fr.Alphart.BAT.Modules.Core;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.URL;
+import java.net.URLConnection;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -12,10 +17,11 @@ import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-import net.alpenblock.bungeeperms.BungeePerms;
 import net.md_5.bungee.api.CommandSender;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
@@ -28,6 +34,9 @@ import com.google.common.base.Charsets;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
+import com.google.common.collect.Lists;
+import com.google.common.reflect.TypeToken;
+import com.google.gson.Gson;
 import com.imaginarycode.minecraft.redisbungee.RedisBungee;
 import com.mojang.api.profiles.HttpProfileRepository;
 import com.mojang.api.profiles.Profile;
@@ -38,6 +47,10 @@ import fr.Alphart.BAT.I18n.I18n;
 import fr.Alphart.BAT.Modules.BATCommand;
 import fr.Alphart.BAT.Modules.IModule;
 import fr.Alphart.BAT.Modules.ModuleConfiguration;
+import fr.Alphart.BAT.Utils.BPInterfaceFactory;
+import fr.Alphart.BAT.Utils.BPInterfaceFactory.PermissionProvider;
+import fr.Alphart.BAT.Utils.Metrics;
+import fr.Alphart.BAT.Utils.Metrics.Graph;
 import fr.Alphart.BAT.Utils.UUIDNotFoundException;
 import fr.Alphart.BAT.Utils.Utils;
 import fr.Alphart.BAT.database.DataSourceHandler;
@@ -98,7 +111,8 @@ public class Core implements IModule, Listener {
 	private final String name = "core";
 	private List<BATCommand> cmds;
 	private static final HttpProfileRepository profileRepository = new HttpProfileRepository();
-	private static BungeePerms bungeePerms;
+	private Gson gson = new Gson();
+	private static PermissionProvider bungeePerms;
 	public static EnhancedDateFormat defaultDF = new EnhancedDateFormat(false);
 
 	@Override
@@ -132,21 +146,24 @@ public class Core implements IModule, Listener {
 		}
 
 		// Register commands
-		cmds = new ArrayList<BATCommand>();
-		final CoreCommand cCmd = new CoreCommand(BAT.getInstance().getConfiguration().isSimpleAliases());
-		cmds.add(cCmd);
-		if(BAT.getInstance().getConfiguration().isSimpleAliases()){
-			cmds.addAll(cCmd.getSubCmd());
-		}
+		cmds = new ArrayList<>();
+		cmds.add(new CoreCommand(this)); // Most of the job is done in the constructor of CoreCommand
 		
 		// Try to hook into BungeePerms
 		if(ProxyServer.getInstance().getPluginManager().getPlugin("BungeePerms") != null){
-			bungeePerms = (BungeePerms) ProxyServer.getInstance().getPluginManager().getPlugin("BungeePerms");
+			bungeePerms = BPInterfaceFactory.getBPInterface(ProxyServer.getInstance().getPluginManager().getPlugin("BungeePerms"));
 		}
 		
 		// Update the date format (if translation has been changed)
 		defaultDF = new EnhancedDateFormat(BAT.getInstance().getConfiguration().isLitteralDate());
 		
+        // Init metrics
+        try{
+            initMetrics();
+        }catch(final IOException e){
+            BAT.getInstance().getLogger().severe("BAT met an error while trying to connect to Metrics :");
+            e.printStackTrace();
+        }
 		return true;
 	}
 
@@ -165,7 +182,11 @@ public class Core implements IModule, Listener {
 	public String getMainCommand() {
 		return "bat";
 	}
-
+	
+	public void addCommand(final BATCommand cmd){
+	    cmds.add(cmd);
+	}
+	
 	/**
 	 * Get the UUID of the specified player
 	 * @param pName
@@ -292,13 +313,77 @@ public class Core implements IModule, Listener {
 				return sender.getPermissions();	
 			}
 			try{
-				return bungeePerms.getPermissionsManager().getUser(sender.getName()).getEffectivePerms();
+				return bungeePerms.getPermissions(sender);
 			}catch(final NullPointerException e){
 				return new ArrayList<String>();
 			}
 		}else{
 			return sender.getPermissions();	
 		}
+	}
+	
+	/**
+	 * Fetch a player's name history from <b>Mojang's server : high latency</b>
+	 * @param pName
+	 * @throws RuntimeException | if any error is met or if the server is offline mode
+	 */
+	public List<String> getPlayerNameHistory(final String pName) throws RuntimeException{
+	    if(!ProxyServer.getInstance().getConfig().isOnlineMode()){
+	        throw new RuntimeException("Can't get player name history from an offline server !");
+	    }
+	    // Fetch player's name history from Mojang servers
+        BufferedReader reader = null;
+        try{
+            final URL mojangURL = new URL("https://api.mojang.com/user/profiles/" + Core.getUUID(pName) + "/names");
+            final URLConnection conn = mojangURL.openConnection();
+            reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            String content = "";
+            String line;
+            while((line = reader.readLine()) != null){
+                content += line;
+            }
+            final List<String> names = Lists.newArrayList();
+            for(final Map<String, Object> entry : 
+                    (Set<Map<String, Object>>) gson.fromJson(content, new TypeToken<Set<Map<String, Object>>>() {}.getType())){
+                names.add((String)entry.get("name"));
+            }
+            return names;
+        }catch(final IOException e){
+            throw new RuntimeException(e);
+        }finally{
+            if(reader != null){
+                try {
+                    reader.close();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+	}
+	
+	public void initMetrics() throws IOException{
+        Metrics metrics = new Metrics(BAT.getInstance());
+        final Graph locale = metrics.createGraph("Locale");
+        locale.addPlotter(new Metrics.Plotter(BAT.getInstance().getConfiguration().getLocale().getLanguage()) {
+            @Override
+            public int getValue() {
+                return 1;
+            }
+        });
+        final Graph RDBMS = metrics.createGraph("RDBMS");
+        RDBMS.addPlotter(new Metrics.Plotter("MySQL") {
+            @Override
+            public int getValue() {
+                return !DataSourceHandler.isSQLite() ? 1 : 0;
+            }
+        });
+        RDBMS.addPlotter(new Metrics.Plotter("SQLite") {
+            @Override
+            public int getValue() {
+                return DataSourceHandler.isSQLite() ? 1 : 0;
+            }
+        });
+        metrics.start();
 	}
 	
 	// Event listener

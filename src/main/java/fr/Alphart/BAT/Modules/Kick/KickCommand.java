@@ -14,6 +14,7 @@ import com.imaginarycode.minecraft.redisbungee.RedisBungee;
 
 import fr.Alphart.BAT.BAT;
 import fr.Alphart.BAT.Modules.BATCommand;
+import fr.Alphart.BAT.Modules.BATCommand.RunAsync;
 import fr.Alphart.BAT.Modules.CommandHandler;
 import fr.Alphart.BAT.Modules.IModule;
 import fr.Alphart.BAT.Modules.InvalidModuleException;
@@ -30,6 +31,7 @@ public class KickCommand extends CommandHandler {
 		kick = kickModule;
 	}
 
+	@RunAsync
 	public static class KickCmd extends BATCommand {
 		public KickCmd() {
 			super("kick", "<player> [reason]", "Kick the player from his current server to the lobby", Action.KICK
@@ -76,6 +78,7 @@ public class KickCommand extends CommandHandler {
 	    		}
 	    		// Check if the per server kick with Redis is working fine.
 		    	final UUID pUUID = RedisBungee.getApi().getUuidFromName(pName, true);
+		    	final String pServer = RedisBungee.getApi().getServerFor(pUUID).getName();
 		    	checkArgument(pUUID != null, _("playerNotFound"));
 		    	// Check if the server of the target isn't the default one. We assume there is the same default server on both Bungee
 		    	// TODO: Add a method to check if it's really on default server
@@ -83,11 +86,14 @@ public class KickCommand extends CommandHandler {
 		    	for(final ListenerInfo listener : ProxyServer.getInstance().getConfig().getListeners()){
 		    		defaultServer = listener.getDefaultServer();
 		    	}
-		    	if(defaultServer == null || RedisBungee.getApi().getServerFor(pUUID).getName().equals(defaultServer)){
+		    	if(defaultServer == null || pServer.equals(defaultServer)){
 		    		throw new IllegalArgumentException(_("cantKickDefaultServer", new String[] { pName }));
 		    	}
+		    	
+                checkArgument(PermissionManager.canExecuteAction(Action.KICK, sender, pServer), _("noPerm"));
+		    	
 		    	final String returnedMsg;
-		    	returnedMsg = kick.kickSQL(pUUID, sender.getName(), RedisBungee.getApi().getServerFor(pUUID).getName(),
+		    	returnedMsg = kick.kickSQL(pUUID, RedisBungee.getApi().getServerFor(pUUID).getName(), sender.getName(), 
 		    		(args.length == 1) ? IModule.NO_REASON : Utils.getFinalArg(args, 1));
 	    	    BAT.getInstance().getRedis().sendMoveDefaultServerPlayer(pUUID);
     	    	BAT.broadcast(returnedMsg, Action.KICK_BROADCAST.getPermission());
@@ -95,6 +101,7 @@ public class KickCommand extends CommandHandler {
 		}
 	}
 
+	@RunAsync
 	public static class GKickCmd extends BATCommand {
 		public GKickCmd() {
 			super("gkick", "<player> [reason]", "Kick the player from the network", Action.KICK.getPermission()

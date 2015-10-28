@@ -71,6 +71,7 @@ public class CommentCommand extends CommandHandler{
 		}
 	}
 	
+	@RunAsync
 	public static class WarnCmd extends BATCommand {
 		public WarnCmd() { super("warn", "<player> <reason>", "Warn a player and add warning note on player's info text.", Action.WARN.getPermission());}
 
@@ -97,7 +98,7 @@ public class CommentCommand extends CommandHandler{
 			
 			comment.insertComment(args[0], reason, Type.WARNING, sender.getName());
 			
-			BAT.broadcast(_("warnBroadcast", new String[]{args[0], sender.getName(), reason}), Action.KICK_BROADCAST.getPermission());
+			BAT.broadcast(_("warnBroadcast", new String[]{args[0], sender.getName(), reason}), Action.WARN_BROADCAST.getPermission());
 			return;
 		}
 	}
